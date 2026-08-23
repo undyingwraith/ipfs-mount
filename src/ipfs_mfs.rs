@@ -3,11 +3,9 @@ use libc::ENOENT;
 use regex::Regex;
 use std::ffi::{OsStr, OsString, c_int};
 use std::process::Command;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use std::vec::Vec;
 use time::Timespec;
 
-//const TTL: Duration = Duration::from_secs(1);
 const TTL: Timespec = Timespec { sec: 1, nsec: 0 };
 const CREATE_TIME: Timespec = Timespec { sec: 1381237736, nsec: 0 };
 
@@ -40,9 +38,7 @@ impl IpfsMfs {
 		let out = String::from_utf8(output.stdout).expect("Failed to parse output");
 		let res = re.captures(&out);
 
-		if res.is_none() {
-			return None;
-		}
+		res.as_ref()?;
 
 		let caps = res.unwrap();
 
@@ -82,7 +78,7 @@ impl IpfsMfs {
 
 	fn append_path(&mut self, mut path: String, filename: &str) -> String {
 		if !path.ends_with("/") {
-			path.push_str("/");
+			path.push('/');
 		}
 
 		path.push_str(filename);
@@ -103,12 +99,10 @@ impl Filesystem for IpfsMfs {
 	fn lookup(&mut self, _req: &Request<'_>, parent: u64, name: &OsStr, reply: ReplyEntry) {
 		println!("lookup {:?}", name);
 
-		let p = self.get_path(parent);
-		if !p.is_none() {
-			let path = self.append_path(p.unwrap(), &name.to_str().unwrap());
-			let stat = self.stat(&path);
-			if !stat.is_none() {
-				reply.entry(&TTL, &stat.unwrap(), 0);
+		if let Some(p) = self.get_path(parent) {
+			let path = self.append_path(p, name.to_str().unwrap());
+			if let Some(stat) = self.stat(&path) {
+				reply.entry(&TTL, &stat, 0);
 				return;
 			}
 		}
@@ -119,16 +113,11 @@ impl Filesystem for IpfsMfs {
 	fn getattr(&mut self, _req: &Request, ino: u64, reply: ReplyAttr) {
 		println!("getattr {:?}", ino);
 
-		let path = self.get_path(ino);
-		if !path.is_none() {
-			let res = self.stat(&path.unwrap());
-			if !res.is_none() {
-				reply.attr(&TTL, &res.unwrap());
-				return;
-			}
+		if let Some(path) = self.get_path(ino) && let Some(res) = self.stat(&path) {
+			reply.attr(&TTL, &res);
+		} else {
+			reply.error(ENOENT);
 		}
-
-		reply.error(ENOENT);
 	}
 
 	fn read(&mut self, _req: &Request, ino: u64, _fh: u64, offset: i64, size: u32, reply: ReplyData) {

@@ -1,4 +1,3 @@
-use fuse;
 use std::env;
 use crate::ipfs_mfs::IpfsMfs;
 
