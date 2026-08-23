@@ -177,3 +177,44 @@ impl Filesystem for IpfsMfs {
 		}
 	}
 }
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	#[test]
+	fn can_retrieve_path_from_ino() {
+		let mut entries = Vec::new();
+		entries.push("/".to_string());
+		entries.push("/test".to_string());
+		let mut fs = IpfsMfs{
+			path: "/".into(),
+			entries,
+		};
+
+		let path1 = fs.get_path(1);
+		assert_eq!(path1.is_none(), false);
+		assert_eq!(path1.unwrap(), "/".to_string());
+
+		let path2 = fs.get_path(2);
+		assert_eq!(path2.is_none(), false);
+		assert_eq!(path2.unwrap(), "/test".to_string());
+
+		let path3 = fs.get_path(3);
+		assert_eq!(path3.is_none(), true);
+	}
+
+	#[test]
+	fn can_append_path() {
+		let mut fs = IpfsMfs{
+			path: "/".into(),
+			entries: Vec::new(),
+		};
+
+		let path1 = fs.append_path("/".to_string(), "test");
+		assert_eq!(path1, "/test");
+
+		let path2 = fs.append_path(path1.to_string(), "test");
+		assert_eq!(path2, "/test/test");
+	}
+}
