@@ -1,11 +1,11 @@
-use fuse::{FileType, FileAttr, Filesystem, Request, ReplyData, ReplyEntry, ReplyAttr, ReplyDirectory};
-use std::ffi::{c_int, OsStr, OsString};
-use std::process::Command;
-use regex::Regex;
-use std::time::{Duration, UNIX_EPOCH, SystemTime};
+use fuse::{FileAttr, FileType, Filesystem, ReplyAttr, ReplyData, ReplyDirectory, ReplyEntry, Request};
 use libc::ENOENT;
-use time::Timespec;
+use regex::Regex;
+use std::ffi::{OsStr, OsString, c_int};
+use std::process::Command;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use std::vec::Vec;
+use time::Timespec;
 
 //const TTL: Duration = Duration::from_secs(1);
 const TTL: Timespec = Timespec { sec: 1, nsec: 0 };
@@ -21,17 +21,14 @@ pub struct IpfsMfs {
 
 impl IpfsMfs {
 	pub fn new(path: OsString) -> Self {
-		Self {
-			path,
-			entries: Vec::new(),
-		}
+		Self { path, entries: Vec::new() }
 	}
 
 	fn stat(&mut self, path: &String) -> Option<FileAttr> {
 		if !self.entries.contains(path) {
 			self.entries.push(path.clone());
 		}
-		
+
 		let re = Regex::new(r"^[A-Za-z0-9]+\nSize: (\d+)\nCumulativeSize: (\d+)\nChildBlocks: (\d+)\nType: (directory|file)").unwrap();
 		let output = Command::new("ipfs")
 			.arg("files")
@@ -51,13 +48,17 @@ impl IpfsMfs {
 
 		let ino = (self.entries.iter().position(|r| r == path).unwrap() + 1) as u64;
 		let size = caps[1].parse::<u64>().unwrap();
-		let kind = if &caps[4] == "directory" { FileType::Directory } else { FileType::RegularFile };
+		let kind = if &caps[4] == "directory" {
+			FileType::Directory
+		} else {
+			FileType::RegularFile
+		};
 
 		Some(FileAttr {
 			ino,
 			size,
 			blocks: 0,
-			atime: CREATE_TIME,                                  // 1970-01-01 00:00:00
+			atime: CREATE_TIME, // 1970-01-01 00:00:00
 			mtime: CREATE_TIME,
 			ctime: CREATE_TIME,
 			crtime: CREATE_TIME,
@@ -145,7 +146,7 @@ impl Filesystem for IpfsMfs {
 					.output()
 					.expect("Failed to execute command");
 				reply.data(&output.stdout);
-			},
+			}
 			None => reply.error(ENOENT),
 		}
 	}
@@ -187,10 +188,7 @@ mod tests {
 		let mut entries = Vec::new();
 		entries.push("/".to_string());
 		entries.push("/test".to_string());
-		let mut fs = IpfsMfs{
-			path: "/".into(),
-			entries,
-		};
+		let mut fs = IpfsMfs { path: "/".into(), entries };
 
 		let path1 = fs.get_path(1);
 		assert_eq!(path1.is_none(), false);
@@ -206,7 +204,7 @@ mod tests {
 
 	#[test]
 	fn can_append_path() {
-		let mut fs = IpfsMfs{
+		let mut fs = IpfsMfs {
 			path: "/".into(),
 			entries: Vec::new(),
 		};

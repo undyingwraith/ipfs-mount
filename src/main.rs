@@ -1,9 +1,8 @@
-use std::env;
 use fuse;
+use std::env;
 use crate::ipfs_mfs::IpfsMfs;
 
 mod ipfs_mfs;
-
 
 fn main() {
 	let mountpoint = env::args_os().nth(1).unwrap();
