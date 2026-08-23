@@ -6,7 +6,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Install dependencies
-        run: apot install libfuse2
+        run: apt install libfuse2
       - uses: actions/checkout@v7
       - name: Check code style
         run: cargo fmt -- --check
