@@ -14,7 +14,7 @@ async fn main() {
 	let gid = unsafe { libc::getgid() };
 
 	let mut mount_options = MountOptions::default();
-	mount_options.uid(uid).gid(gid).read_only(true);
+	mount_options.uid(uid).gid(gid); //.read_only(true);
 
 	Session::new(mount_options)
 		.mount_with_unprivileged(IpfsMfs::new(path), mountpoint)

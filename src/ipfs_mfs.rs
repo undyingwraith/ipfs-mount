@@ -1,15 +1,16 @@
 use fuse3::raw::Filesystem;
 use fuse3::raw::prelude::*;
 use fuse3::raw::reply::{ReplyEntry, ReplyInit};
-use fuse3::{FileType, Result, Timestamp};
+use fuse3::{Errno, FileType, Result, Timestamp};
 use futures_util::stream;
 use futures_util::stream::Stream;
 use libc::ENOENT;
 use regex::Regex;
 use std::ffi::{OsStr, OsString};
+use std::io::Write;
 use std::iter::Iterator;
 use std::num::NonZeroU32;
-use std::process::Command;
+use std::process::{Command, Stdio};
 use std::sync::RwLock;
 use std::time::Duration;
 use std::vec::Vec;
@@ -47,10 +48,6 @@ impl IpfsMfs {
 	}
 
 	fn stat(&self, path: &String) -> Option<FileAttr> {
-		if !self.entries.read().unwrap().contains(path) {
-			self.entries.write().unwrap().push(path.clone());
-		}
-
 		let re = Regex::new(
 			r"^[A-Za-z0-9]+\nSize: (\d+)\nCumulativeSize: (\d+)\nChildBlocks: (\d+)\nType: (directory|file)",
 		)
@@ -66,6 +63,12 @@ impl IpfsMfs {
 		let res = re.captures(&out);
 
 		res.as_ref()?;
+
+		// Only add valid paths to self.entries
+		if !self.entries.read().unwrap().contains(path) {
+			println!("stat added {:?}", path);
+			self.entries.write().unwrap().push(path.clone());
+		}
 
 		let caps = res.unwrap();
 
@@ -118,15 +121,20 @@ impl IpfsMfs {
 
 impl Filesystem for IpfsMfs {
 	async fn init(&self, _req: Request) -> Result<ReplyInit> {
+		println!("init");
+		//TODO: validate ipfs is reachable
 		self.stat(&self.path.clone().into_string().unwrap());
 		Ok(ReplyInit {
 			max_write: NonZeroU32::new(16 * 1024).unwrap(),
 		})
 	}
 
-	async fn destroy(&self, _req: Request) {}
+	async fn destroy(&self, _req: Request) {
+		println!("destroy");
+	}
 
 	async fn lookup(&self, _req: Request, parent: u64, name: &OsStr) -> Result<ReplyEntry> {
+		println!("lookup {:?} {:?}", parent, name);
 		if let Some(p) = self.get_path(parent) {
 			let path = self.append_path(p, name.to_str().unwrap());
 			if let Some(stat) = self.stat(&path) {
@@ -141,17 +149,107 @@ impl Filesystem for IpfsMfs {
 		Err(ENOENT.into())
 	}
 
+	async fn forget(&self, _req: Request, inode: u64, _nlookup: u64) {
+		println!("forget {:?}", inode);
+		//TODO: free up path in self.entries
+	}
+
 	async fn getattr(&self, _req: Request, ino: u64, _fh: Option<u64>, _flags: u32) -> Result<ReplyAttr> {
-		if let Some(path) = self.get_path(ino)
-			&& let Some(res) = self.stat(&path)
-		{
-			Ok(ReplyAttr { ttl: TTL, attr: res })
-		} else {
-			Err(ENOENT.into())
-		}
+		println!("getattr {:?}", ino);
+
+		let path = self.get_path(ino).ok_or_else(|| Errno::from(ENOENT))?;
+		let res = self.stat(&path).ok_or_else(|| Errno::from(ENOENT))?;
+
+		Ok(ReplyAttr { ttl: TTL, attr: res })
+	}
+
+	async fn mkdir(
+		&self,
+		_req: Request,
+		parent: u64,
+		name: &OsStr,
+		_mode: u32, //TODO: use this if applicable
+		_umask: u32,
+	) -> Result<ReplyEntry> {
+		println!("mkdir {:?} {:?}", parent, name);
+		let parent_path = self.get_path(parent).ok_or_else(|| Errno::from(ENOENT))?;
+		let path = self.append_path(parent_path, name.to_str().unwrap());
+
+		let _output = Command::new("ipfs")
+			.arg("files")
+			.arg("mkdir")
+			.arg(&path)
+			.output()
+			.expect("Failed to execute command");
+
+		//TODO: better error handling/throwing
+
+		let stat = self.stat(&path).ok_or_else(|| Errno::from(ENOENT))?;
+
+		Ok(ReplyEntry {
+			ttl: TTL,
+			attr: stat,
+			generation: 0,
+		})
+	}
+
+	async fn unlink(&self, _req: Request, parent: u64, name: &OsStr) -> Result<()> {
+		println!("unlink {:?} {:?}", parent, name);
+		let parent_path = self.get_path(parent).ok_or_else(|| Errno::from(ENOENT))?;
+		let path = self.append_path(parent_path, name.to_str().unwrap());
+
+		let _output = Command::new("ipfs")
+			.arg("files")
+			.arg("rm")
+			.arg(&path)
+			.output()
+			.expect("Failed to execute command");
+
+		//TODO: better error handling/throwing
+
+		Ok(())
+	}
+
+	async fn rmdir(&self, _req: Request, parent: u64, name: &OsStr) -> Result<()> {
+		println!("rmdir {:?} {:?}", parent, name);
+		let parent_path = self.get_path(parent).ok_or_else(|| Errno::from(ENOENT))?;
+		let path = self.append_path(parent_path, name.to_str().unwrap());
+
+		let _output = Command::new("ipfs")
+			.arg("files")
+			.arg("rm")
+			.arg("-r")
+			.arg(&path)
+			.output()
+			.expect("Failed to execute command");
+
+		//TODO: better error handling/throwing
+
+		Ok(())
+	}
+
+	async fn rename(&self, _req: Request, parent: u64, name: &OsStr, new_parent: u64, new_name: &OsStr) -> Result<()> {
+		println!("rename {:?} {:?} {:?} {:?}", parent, name, new_parent, new_name);
+		let src_parent_path = self.get_path(parent).ok_or_else(|| Errno::from(ENOENT))?;
+		let source = self.append_path(src_parent_path, name.to_str().unwrap());
+		let tgt_parent_path = self.get_path(new_parent).ok_or_else(|| Errno::from(ENOENT))?;
+		let target = self.append_path(tgt_parent_path, new_name.to_str().unwrap());
+
+		let _output = Command::new("ipfs")
+			.arg("files")
+			.arg("mv")
+			.arg(&source)
+			.arg(&target)
+			.output()
+			.expect("Failed to execute command");
+
+		//TODO: better error handling/throwing
+
+		Ok(())
 	}
 
 	async fn read(&self, _req: Request, ino: u64, _fh: u64, offset: u64, size: u32) -> Result<ReplyData> {
+		println!("read {:?} {:?} {:?}", ino, offset, size);
 		match self.get_path(ino) {
 			Some(path) => {
 				let output = Command::new("ipfs")
@@ -171,6 +269,78 @@ impl Filesystem for IpfsMfs {
 			None => Err(ENOENT.into()),
 		}
 	}
+
+	async fn write(
+		&self,
+		_req: Request,
+		inode: u64,
+		_fh: u64,
+		offset: u64,
+		data: &[u8],
+		_write_flags: u32,
+		_flags: u32,
+	) -> Result<ReplyWrite> {
+		println!("write {:?} {:?}", inode, offset);
+		let path = self.get_path(inode).ok_or_else(|| Errno::from(ENOENT))?;
+
+		let mut child = Command::new("ipfs")
+			.arg("files")
+			.arg("write")
+			.arg("-o")
+			.arg(offset.to_string())
+			.arg(path)
+			.stdin(Stdio::piped())
+			.stdout(Stdio::piped())
+			.spawn()
+			.expect("Failed to execute command");
+
+		let mut stdin = child.stdin.take().expect("Failed to open stdin");
+		std::thread::scope(|s| {
+			let t = s.spawn(move || {
+				stdin.write_all(data).expect("Failed to write to stdin");
+			});
+
+			let _output = child.wait_with_output().expect("Failed to read stdout");
+
+			let _ = t.join();
+		});
+
+		Ok(ReplyWrite {
+			written: data.len() as _,
+		})
+	}
+
+	async fn create(
+		&self,
+		_req: Request,
+		parent: u64,
+		name: &OsStr,
+		_mode: u32, //TODO: use this if applicable
+		flags: u32, //TODO: use this if applicable
+	) -> Result<ReplyCreated> {
+		println!("create {:?} {:?}", parent, name);
+		let parent_path = self.get_path(parent).ok_or_else(|| Errno::from(ENOENT))?;
+		let path = self.append_path(parent_path, name.to_str().unwrap());
+
+		let _output = Command::new("ipfs")
+			.arg("files")
+			.arg("write")
+			.arg("-e")
+			.arg(&path)
+			.output()
+			.expect("Failed to execute command");
+
+		let stat = self.stat(&path).ok_or_else(|| Errno::from(ENOENT))?;
+
+		Ok(ReplyCreated {
+			ttl: TTL,
+			attr: stat,
+			generation: 0,
+			fh: 0,
+			flags,
+		})
+	}
+
 	async fn readdir(
 		&self,
 		_req: Request,
@@ -178,6 +348,7 @@ impl Filesystem for IpfsMfs {
 		_fh: u64,
 		offset: i64,
 	) -> Result<ReplyDirectory<impl Stream<Item = Result<DirectoryEntry>> + Send + '_>> {
+		println!("readdir {:?} {:?}", ino, offset);
 		match self.get_path(ino) {
 			None => Err(ENOENT.into()),
 			Some(path) => {
@@ -219,6 +390,7 @@ impl Filesystem for IpfsMfs {
 		offset: u64,
 		_lock_owner: u64,
 	) -> Result<ReplyDirectoryPlus<impl Stream<Item = Result<DirectoryEntryPlus>> + Send + '_>> {
+		println!("readdirplus {:?} {:?}", ino, offset);
 		match self.get_path(ino) {
 			None => Err(ENOENT.into()),
 			Some(path) => {
@@ -257,7 +429,32 @@ impl Filesystem for IpfsMfs {
 	}
 
 	async fn statfs(&self, _req: Request, _inode: u64) -> Result<ReplyStatFs> {
+		println!("statfs");
 		Ok(STATFS)
+	}
+
+	async fn copy_file_range(
+		&self,
+		req: Request,
+		inode: u64,
+		fh_in: u64,
+		off_in: u64,
+		inode_out: u64,
+		fh_out: u64,
+		off_out: u64,
+		length: u64,
+		flags: u64,
+	) -> Result<ReplyCopyFileRange> {
+		println!("copy_file_range");
+		let data = self.read(req, inode, fh_in, off_in, length as _).await?;
+
+		let data = data.data.as_ref();
+
+		let ReplyWrite { written } = self.write(req, inode_out, fh_out, off_out, data, 0, flags as _).await?;
+
+		Ok(ReplyCopyFileRange {
+			copied: u64::from(written),
+		})
 	}
 }
 
