@@ -28,15 +28,15 @@ impl PathStore {
 		}
 	}
 
-	pub fn has_path(&self, path: &String) -> bool {
-		self.entries.read().unwrap().contains(path)
+	pub fn has_path(&self, path: &str) -> bool {
+		self.entries.read().unwrap().contains(&path.to_string())
 	}
 
 	pub fn add_path(&self, path: &str) {
 		self.entries.write().unwrap().push(path.to_string());
 	}
 
-	pub fn get_ino(&self, path: &String) -> Option<u64> {
+	pub fn get_ino(&self, path: &str) -> Option<u64> {
 		self.entries
 			.read()
 			.unwrap()
