@@ -4,6 +4,7 @@ use fuse3::raw::prelude::*;
 use std::env;
 
 mod ipfs_mfs;
+mod path_store;
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() {

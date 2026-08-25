@@ -1,3 +1,4 @@
+use crate::path_store::PathStore;
 use fuse3::raw::Filesystem;
 use fuse3::raw::prelude::*;
 use fuse3::raw::reply::{ReplyEntry, ReplyInit};
@@ -11,7 +12,6 @@ use std::io::Write;
 use std::iter::Iterator;
 use std::num::NonZeroU32;
 use std::process::{Command, Stdio};
-use std::sync::RwLock;
 use std::time::Duration;
 use std::vec::Vec;
 
@@ -36,14 +36,14 @@ pub struct IpfsMfs {
 	path: OsString,
 
 	// Internal store to map ino to path
-	entries: RwLock<Vec<String>>,
+	store: PathStore,
 }
 
 impl IpfsMfs {
 	pub fn new(path: OsString) -> Self {
 		Self {
 			path,
-			entries: RwLock::new(Vec::new()),
+			store: PathStore::default(),
 		}
 	}
 
@@ -65,14 +65,14 @@ impl IpfsMfs {
 		res.as_ref()?;
 
 		// Only add valid paths to self.entries
-		if !self.entries.read().unwrap().contains(path) {
+		if !self.store.has_path(path) {
 			println!("stat added {:?}", path);
-			self.entries.write().unwrap().push(path.clone());
+			self.store.add_path(path);
 		}
 
 		let caps = res.unwrap();
 
-		let ino = (self.entries.read().unwrap().iter().position(|r| r == path).unwrap() + 1) as u64;
+		let ino = self.store.get_ino(path).unwrap();
 		let size = caps[1].parse::<u64>().unwrap();
 		let kind = if &caps[4] == "directory" {
 			FileType::Directory
@@ -100,30 +100,13 @@ impl IpfsMfs {
 			blksize: 0,
 		})
 	}
-
-	fn get_path(&self, ino: u64) -> Option<String> {
-		if self.entries.read().unwrap().len() > (ino - 1) as usize {
-			return Some(self.entries.read().unwrap()[(ino - 1) as usize].clone());
-		}
-
-		None
-	}
-
-	fn append_path(&self, mut path: String, filename: &str) -> String {
-		if !path.ends_with("/") {
-			path.push('/');
-		}
-
-		path.push_str(filename);
-		path
-	}
 }
 
 impl Filesystem for IpfsMfs {
 	async fn init(&self, _req: Request) -> Result<ReplyInit> {
 		println!("init");
 		//TODO: validate ipfs is reachable
-		self.stat(&self.path.clone().into_string().unwrap());
+		self.store.add_path(&self.path.clone().into_string().unwrap());
 		Ok(ReplyInit {
 			max_write: NonZeroU32::new(16 * 1024).unwrap(),
 		})
@@ -135,18 +118,17 @@ impl Filesystem for IpfsMfs {
 
 	async fn lookup(&self, _req: Request, parent: u64, name: &OsStr) -> Result<ReplyEntry> {
 		println!("lookup {:?} {:?}", parent, name);
-		if let Some(p) = self.get_path(parent) {
-			let path = self.append_path(p, name.to_str().unwrap());
-			if let Some(stat) = self.stat(&path) {
-				return Ok(ReplyEntry {
-					ttl: TTL,
-					attr: stat,
-					generation: 0,
-				});
-			}
-		}
+		let path = self
+			.store
+			.get_child_path(parent, name.to_str().unwrap())
+			.ok_or_else(|| Errno::from(ENOENT))?;
+		let stat = self.stat(&path).ok_or_else(|| Errno::from(ENOENT))?;
 
-		Err(ENOENT.into())
+		Ok(ReplyEntry {
+			ttl: TTL,
+			attr: stat,
+			generation: 0,
+		})
 	}
 
 	async fn forget(&self, _req: Request, inode: u64, _nlookup: u64) {
@@ -157,7 +139,7 @@ impl Filesystem for IpfsMfs {
 	async fn getattr(&self, _req: Request, ino: u64, _fh: Option<u64>, _flags: u32) -> Result<ReplyAttr> {
 		println!("getattr {:?}", ino);
 
-		let path = self.get_path(ino).ok_or_else(|| Errno::from(ENOENT))?;
+		let path = self.store.get_path(ino).ok_or_else(|| Errno::from(ENOENT))?;
 		let res = self.stat(&path).ok_or_else(|| Errno::from(ENOENT))?;
 
 		Ok(ReplyAttr { ttl: TTL, attr: res })
@@ -172,8 +154,10 @@ impl Filesystem for IpfsMfs {
 		_umask: u32,
 	) -> Result<ReplyEntry> {
 		println!("mkdir {:?} {:?}", parent, name);
-		let parent_path = self.get_path(parent).ok_or_else(|| Errno::from(ENOENT))?;
-		let path = self.append_path(parent_path, name.to_str().unwrap());
+		let path = self
+			.store
+			.get_child_path(parent, name.to_str().unwrap())
+			.ok_or_else(|| Errno::from(ENOENT))?;
 
 		let _output = Command::new("ipfs")
 			.arg("files")
@@ -195,8 +179,10 @@ impl Filesystem for IpfsMfs {
 
 	async fn unlink(&self, _req: Request, parent: u64, name: &OsStr) -> Result<()> {
 		println!("unlink {:?} {:?}", parent, name);
-		let parent_path = self.get_path(parent).ok_or_else(|| Errno::from(ENOENT))?;
-		let path = self.append_path(parent_path, name.to_str().unwrap());
+		let path = self
+			.store
+			.get_child_path(parent, name.to_str().unwrap())
+			.ok_or_else(|| Errno::from(ENOENT))?;
 
 		let _output = Command::new("ipfs")
 			.arg("files")
@@ -212,8 +198,10 @@ impl Filesystem for IpfsMfs {
 
 	async fn rmdir(&self, _req: Request, parent: u64, name: &OsStr) -> Result<()> {
 		println!("rmdir {:?} {:?}", parent, name);
-		let parent_path = self.get_path(parent).ok_or_else(|| Errno::from(ENOENT))?;
-		let path = self.append_path(parent_path, name.to_str().unwrap());
+		let path = self
+			.store
+			.get_child_path(parent, name.to_str().unwrap())
+			.ok_or_else(|| Errno::from(ENOENT))?;
 
 		let _output = Command::new("ipfs")
 			.arg("files")
@@ -230,10 +218,14 @@ impl Filesystem for IpfsMfs {
 
 	async fn rename(&self, _req: Request, parent: u64, name: &OsStr, new_parent: u64, new_name: &OsStr) -> Result<()> {
 		println!("rename {:?} {:?} {:?} {:?}", parent, name, new_parent, new_name);
-		let src_parent_path = self.get_path(parent).ok_or_else(|| Errno::from(ENOENT))?;
-		let source = self.append_path(src_parent_path, name.to_str().unwrap());
-		let tgt_parent_path = self.get_path(new_parent).ok_or_else(|| Errno::from(ENOENT))?;
-		let target = self.append_path(tgt_parent_path, new_name.to_str().unwrap());
+		let source = self
+			.store
+			.get_child_path(parent, name.to_str().unwrap())
+			.ok_or_else(|| Errno::from(ENOENT))?;
+		let target = self
+			.store
+			.get_child_path(new_parent, new_name.to_str().unwrap())
+			.ok_or_else(|| Errno::from(ENOENT))?;
 
 		let _output = Command::new("ipfs")
 			.arg("files")
@@ -250,7 +242,7 @@ impl Filesystem for IpfsMfs {
 
 	async fn read(&self, _req: Request, ino: u64, _fh: u64, offset: u64, size: u32) -> Result<ReplyData> {
 		println!("read {:?} {:?} {:?}", ino, offset, size);
-		match self.get_path(ino) {
+		match self.store.get_path(ino) {
 			Some(path) => {
 				let output = Command::new("ipfs")
 					.arg("files")
@@ -281,7 +273,7 @@ impl Filesystem for IpfsMfs {
 		_flags: u32,
 	) -> Result<ReplyWrite> {
 		println!("write {:?} {:?}", inode, offset);
-		let path = self.get_path(inode).ok_or_else(|| Errno::from(ENOENT))?;
+		let path = self.store.get_path(inode).ok_or_else(|| Errno::from(ENOENT))?;
 
 		let mut child = Command::new("ipfs")
 			.arg("files")
@@ -319,8 +311,10 @@ impl Filesystem for IpfsMfs {
 		flags: u32, //TODO: use this if applicable
 	) -> Result<ReplyCreated> {
 		println!("create {:?} {:?}", parent, name);
-		let parent_path = self.get_path(parent).ok_or_else(|| Errno::from(ENOENT))?;
-		let path = self.append_path(parent_path, name.to_str().unwrap());
+		let path = self
+			.store
+			.get_child_path(parent, name.to_str().unwrap())
+			.ok_or_else(|| Errno::from(ENOENT))?;
 
 		let _output = Command::new("ipfs")
 			.arg("files")
@@ -349,7 +343,7 @@ impl Filesystem for IpfsMfs {
 		offset: i64,
 	) -> Result<ReplyDirectory<impl Stream<Item = Result<DirectoryEntry>> + Send + '_>> {
 		println!("readdir {:?} {:?}", ino, offset);
-		match self.get_path(ino) {
+		match self.store.get_path(ino) {
 			None => Err(ENOENT.into()),
 			Some(path) => {
 				let output = Command::new("ipfs")
@@ -365,7 +359,7 @@ impl Filesystem for IpfsMfs {
 
 				let mut res = Vec::new();
 				for (i, name) in names.enumerate().skip(to_skip) {
-					let path = self.append_path(self.entries.read().unwrap()[(ino - 1) as usize].clone(), name);
+					let path = self.store.get_child_path(ino, name).unwrap();
 					let stat = self.stat(&path).unwrap();
 					res.push(Ok(DirectoryEntry {
 						inode: stat.ino,
@@ -391,7 +385,7 @@ impl Filesystem for IpfsMfs {
 		_lock_owner: u64,
 	) -> Result<ReplyDirectoryPlus<impl Stream<Item = Result<DirectoryEntryPlus>> + Send + '_>> {
 		println!("readdirplus {:?} {:?}", ino, offset);
-		match self.get_path(ino) {
+		match self.store.get_path(ino) {
 			None => Err(ENOENT.into()),
 			Some(path) => {
 				let output = Command::new("ipfs")
@@ -407,7 +401,7 @@ impl Filesystem for IpfsMfs {
 
 				let mut res = Vec::new();
 				for (i, name) in names.enumerate().skip(to_skip) {
-					let path = self.append_path(self.entries.read().unwrap()[(ino - 1) as usize].clone(), name);
+					let path = self.store.get_child_path(ino, name).unwrap();
 					let stat = self.stat(&path).unwrap();
 					res.push(Ok(DirectoryEntryPlus {
 						inode: stat.ino,
@@ -455,46 +449,5 @@ impl Filesystem for IpfsMfs {
 		Ok(ReplyCopyFileRange {
 			copied: u64::from(written),
 		})
-	}
-}
-
-#[cfg(test)]
-mod tests {
-	use super::*;
-
-	#[test]
-	fn can_retrieve_path_from_ino() {
-		let mut entries = Vec::new();
-		entries.push("/".to_string());
-		entries.push("/test".to_string());
-		let mut fs = IpfsMfs {
-			path: "/".into(),
-			entries: RwLock::new(entries),
-		};
-
-		let path1 = fs.get_path(1);
-		assert_eq!(path1.is_none(), false);
-		assert_eq!(path1.unwrap(), "/".to_string());
-
-		let path2 = fs.get_path(2);
-		assert_eq!(path2.is_none(), false);
-		assert_eq!(path2.unwrap(), "/test".to_string());
-
-		let path3 = fs.get_path(3);
-		assert_eq!(path3.is_none(), true);
-	}
-
-	#[test]
-	fn can_append_path() {
-		let mut fs = IpfsMfs {
-			path: "/".into(),
-			entries: RwLock::new(Vec::new()),
-		};
-
-		let path1 = fs.append_path("/".to_string(), "test");
-		assert_eq!(path1, "/test");
-
-		let path2 = fs.append_path(path1.to_string(), "test");
-		assert_eq!(path2, "/test/test");
 	}
 }
