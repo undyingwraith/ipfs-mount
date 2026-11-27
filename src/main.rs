@@ -1,11 +1,8 @@
-use crate::ipfs_mfs::IpfsMfs;
 use fuse3::MountOptions;
 use fuse3::raw::prelude::*;
 use std::env;
 
-mod base_fs;
-mod ipfs_mfs;
-mod path_store;
+use ipfs_mount::IpfsMfs;
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() {
