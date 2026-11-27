@@ -4,11 +4,10 @@
 //! ```no_run
 //! use std::env;
 //! use tokio::signal;
-//! use ipfs_mount::mount;
 //!
 //! #[tokio::main(flavor = "current_thread")]
 //! async fn main() {
-//!    let handle = mount("/mnt", "/").await;
+//!    let handle = ipfs_mount::mount("/mnt", "/").await;
 //!
 //!    signal::ctrl_c().await.expect("failed to listen for event");
 //!
@@ -24,6 +23,17 @@ use fuse3::MountOptions;
 use fuse3::path::Session;
 use fuse3::raw::MountHandle;
 
+/// Mounts specified `path` at the specified `mountpoint`.
+/// Returns a [`MountHandle`], that can be used to unmount.
+///
+/// Example:
+/// ```no_run
+/// # #[tokio::main(flavor = "current_thread")]
+/// # async fn main() {
+/// let handle = ipfs_mount::mount("/mnt", "/").await;
+/// handle.unmount().await.expect("failed to unmount");
+/// # }
+/// ```
 pub async fn mount<S: AsRef<str>>(mountpoint: S, path: S) -> MountHandle {
 	let uid = unsafe { libc::getuid() };
 	let gid = unsafe { libc::getgid() };
