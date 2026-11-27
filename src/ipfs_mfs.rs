@@ -8,7 +8,7 @@ use futures_util::stream;
 use futures_util::stream::Stream;
 use libc::ENOENT;
 use regex::Regex;
-use std::ffi::{OsStr, OsString};
+use std::ffi::OsStr;
 use std::io::Write;
 use std::iter::Iterator;
 use std::num::NonZeroU32;
@@ -33,14 +33,15 @@ const STATFS: ReplyStatFs = ReplyStatFs {
 };
 
 pub struct IpfsMfs {
-	// Internal store to map ino to path
+	/// Internal store to map ino to path
 	store: PathStore,
 }
 
 impl IpfsMfs {
-	pub fn new(path: OsString) -> Self {
+	/// Creates a new instance of [`IpfsMfs`].
+	pub fn new<S: AsRef<str>>(path: S) -> Self {
 		let store = PathStore::default();
-		store.add_path(&path.into_string().unwrap());
+		store.add_path(path.as_ref());
 		Self { store }
 	}
 }

@@ -1,24 +1,16 @@
-use fuse3::MountOptions;
-use fuse3::raw::prelude::*;
 use std::env;
+use tokio::signal;
 
-use ipfs_mount::IpfsMfs;
+use ipfs_mount::mount;
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() {
 	let mountpoint = env::args_os().nth(1).unwrap();
 	let path = env::args_os().nth(2).unwrap();
 
-	let uid = unsafe { libc::getuid() };
-	let gid = unsafe { libc::getgid() };
+	let handle = mount(mountpoint.to_str().unwrap(), path.to_str().unwrap()).await;
 
-	let mut mount_options = MountOptions::default();
-	mount_options.uid(uid).gid(gid); //.read_only(true);
+	signal::ctrl_c().await.expect("failed to listen for event");
 
-	Session::new(mount_options)
-		.mount_with_unprivileged(IpfsMfs::new(path), mountpoint)
-		.await
-		.unwrap()
-		.await
-		.unwrap()
+	handle.unmount().await.expect("failed to unmount");
 }
