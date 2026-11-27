@@ -1,9 +1,7 @@
 use crate::base_fs::{ReadonlyBaseFs, WriteableBaseFs};
-use crate::path_store::PathStore;
-use fuse3::raw::Filesystem;
-use fuse3::raw::prelude::*;
-use fuse3::raw::reply::{ReplyEntry, ReplyInit};
-use fuse3::{Errno, FileType, Result, Timestamp};
+use fuse3::path::PathFilesystem;
+use fuse3::path::prelude::*;
+use fuse3::{Errno, FileType, Result};
 use futures_util::stream;
 use futures_util::stream::Stream;
 use libc::ENOENT;
@@ -12,15 +10,12 @@ use std::ffi::OsStr;
 use std::io::Write;
 use std::iter::Iterator;
 use std::num::NonZeroU32;
+use std::path::PathBuf;
 use std::process::{Command, Stdio};
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 use std::vec::Vec;
 
 const TTL: Duration = Duration::from_secs(1);
-const CREATE_TIME: Timestamp = Timestamp {
-	sec: 1381237736,
-	nsec: 0,
-};
 const STATFS: ReplyStatFs = ReplyStatFs {
 	blocks: 1,
 	bfree: 0,
@@ -33,21 +28,21 @@ const STATFS: ReplyStatFs = ReplyStatFs {
 };
 
 pub struct IpfsMfs {
-	/// Internal store to map ino to path
-	store: PathStore,
+	path: PathBuf,
 }
 
 impl IpfsMfs {
 	/// Creates a new instance of [`IpfsMfs`].
 	pub fn new<S: AsRef<str>>(path: S) -> Self {
-		let store = PathStore::default();
-		store.add_path(path.as_ref());
-		Self { store }
+		Self {
+			path: PathBuf::from(path.as_ref()),
+		}
 	}
 }
 
 impl ReadonlyBaseFs for IpfsMfs {
 	fn stat(&self, path: &str) -> Option<FileAttr> {
+		let path = self.path.join(PathBuf::from(path).strip_prefix("/").unwrap());
 		let re = Regex::new(
 			r"^[A-Za-z0-9]+\nSize: (\d+)\nCumulativeSize: (\d+)\nChildBlocks: (\d+)\nType: (directory|file)",
 		)
@@ -64,15 +59,8 @@ impl ReadonlyBaseFs for IpfsMfs {
 
 		res.as_ref()?;
 
-		// Only add valid paths to self.entries
-		if !self.store.has_path(path) {
-			println!("stat added {:?}", path);
-			self.store.add_path(path);
-		}
-
 		let caps = res.unwrap();
 
-		let ino = self.store.get_ino(path).unwrap();
 		let size = caps[1].parse::<u64>().unwrap();
 		let kind = if &caps[4] == "directory" {
 			FileType::Directory
@@ -81,19 +69,18 @@ impl ReadonlyBaseFs for IpfsMfs {
 		};
 
 		Some(FileAttr {
-			ino,
 			size,
 			blocks: 0,
-			atime: CREATE_TIME,
-			mtime: CREATE_TIME,
-			ctime: CREATE_TIME,
+			atime: SystemTime::UNIX_EPOCH,
+			mtime: SystemTime::UNIX_EPOCH,
+			ctime: SystemTime::UNIX_EPOCH,
 			#[cfg(target_os = "macos")]
 			crtime: CREATE_TIME,
 			kind,
-			perm: 0o755,
-			nlink: 2,
-			uid: 501,
-			gid: 20,
+			perm: if kind == FileType::Directory { 0o755 } else { 0o644 },
+			nlink: if kind == FileType::Directory { 2 } else { 1 },
+			uid: 501, //TODO: use user that started the rust program
+			gid: 20,  //TODO: same for group
 			rdev: 0,
 			#[cfg(target_os = "macos")]
 			flags: 0,
@@ -102,6 +89,7 @@ impl ReadonlyBaseFs for IpfsMfs {
 	}
 
 	fn read(&self, path: &str, offset: u64, size: u32) -> Vec<u8> {
+		let path = self.path.join(PathBuf::from(path).strip_prefix("/").unwrap());
 		let output = Command::new("ipfs")
 			.arg("files")
 			.arg("read")
@@ -117,6 +105,7 @@ impl ReadonlyBaseFs for IpfsMfs {
 	}
 
 	fn ls(&self, path: &str) -> Vec<String> {
+		let path = self.path.join(PathBuf::from(path).strip_prefix("/").unwrap());
 		let output = Command::new("ipfs")
 			.arg("files")
 			.arg("ls")
@@ -131,6 +120,7 @@ impl ReadonlyBaseFs for IpfsMfs {
 
 impl WriteableBaseFs for IpfsMfs {
 	fn write(&self, path: &str, offset: u64, data: &[u8]) {
+		let path = self.path.join(PathBuf::from(path).strip_prefix("/").unwrap());
 		let mut child = Command::new("ipfs")
 			.arg("files")
 			.arg("write")
@@ -155,6 +145,7 @@ impl WriteableBaseFs for IpfsMfs {
 	}
 
 	fn create(&self, path: &str) {
+		let path = self.path.join(PathBuf::from(path).strip_prefix("/").unwrap());
 		let _output = Command::new("ipfs")
 			.arg("files")
 			.arg("write")
@@ -165,6 +156,7 @@ impl WriteableBaseFs for IpfsMfs {
 	}
 
 	fn mkdir(&self, path: &str) {
+		let path = self.path.join(PathBuf::from(path).strip_prefix("/").unwrap());
 		let _output = Command::new("ipfs")
 			.arg("files")
 			.arg("mkdir")
@@ -174,16 +166,19 @@ impl WriteableBaseFs for IpfsMfs {
 	}
 
 	fn mv(&self, source: &str, target: &str) {
+		let source_path = self.path.join(PathBuf::from(source).strip_prefix("/").unwrap());
+		let target_path = self.path.join(PathBuf::from(target).strip_prefix("/").unwrap());
 		let _output = Command::new("ipfs")
 			.arg("files")
 			.arg("mv")
-			.arg(source)
-			.arg(target)
+			.arg(source_path)
+			.arg(target_path)
 			.output()
 			.expect("Failed to execute command");
 	}
 
 	fn rm(&self, path: &str) {
+		let path = self.path.join(PathBuf::from(path).strip_prefix("/").unwrap());
 		let _output = Command::new("ipfs")
 			.arg("files")
 			.arg("rm")
@@ -193,6 +188,7 @@ impl WriteableBaseFs for IpfsMfs {
 	}
 
 	fn rmdir(&self, path: &str) {
+		let path = self.path.join(PathBuf::from(path).strip_prefix("/").unwrap());
 		let _output = Command::new("ipfs")
 			.arg("files")
 			.arg("rm")
@@ -203,9 +199,9 @@ impl WriteableBaseFs for IpfsMfs {
 	}
 }
 
-impl Filesystem for IpfsMfs {
+impl PathFilesystem for IpfsMfs {
 	async fn init(&self, _req: Request) -> Result<ReplyInit> {
-		println!("init");
+		println!("init {:?}", self.path);
 		//TODO: validate ipfs is reachable
 		Ok(ReplyInit {
 			max_write: NonZeroU32::new(16 * 1024).unwrap(),
@@ -213,42 +209,42 @@ impl Filesystem for IpfsMfs {
 	}
 
 	async fn destroy(&self, _req: Request) {
-		println!("destroy");
+		// NOOP
 	}
 
-	async fn lookup(&self, _req: Request, parent: u64, name: &OsStr) -> Result<ReplyEntry> {
+	async fn lookup(&self, _req: Request, parent: &OsStr, name: &OsStr) -> Result<ReplyEntry> {
 		println!("lookup {:?} {:?}", parent, name);
-		let path = self
-			.store
-			.get_child_path(parent, name.to_str().unwrap())
-			.ok_or_else(|| Errno::from(ENOENT))?;
-		let stat = self.stat(&path).ok_or_else(|| Errno::from(ENOENT))?;
+		let mut path = PathBuf::from(parent);
+		path.push(name);
+		let stat = self.stat(path.to_str().unwrap()).ok_or_else(|| Errno::from(ENOENT))?;
 
-		Ok(ReplyEntry {
-			ttl: TTL,
-			attr: stat,
-			generation: 0,
-		})
+		Ok(ReplyEntry { ttl: TTL, attr: stat })
 	}
 
-	async fn forget(&self, _req: Request, inode: u64, _nlookup: u64) {
+	async fn forget(&self, _req: Request, inode: &OsStr, _nlookup: u64) {
 		println!("forget {:?}", inode);
 		//TODO: free up path in self.entries
 	}
 
-	async fn getattr(&self, _req: Request, ino: u64, _fh: Option<u64>, _flags: u32) -> Result<ReplyAttr> {
-		println!("getattr {:?}", ino);
+	async fn getattr(&self, _req: Request, path: Option<&OsStr>, _fh: Option<u64>, _flags: u32) -> Result<ReplyAttr> {
+		let path = path.ok_or_else(Errno::new_not_exist)?.to_string_lossy();
+		println!("getattr {:?}", path);
 
-		let path = self.store.get_path(ino).ok_or_else(|| Errno::from(ENOENT))?;
 		let res = self.stat(&path).ok_or_else(|| Errno::from(ENOENT))?;
 
 		Ok(ReplyAttr { ttl: TTL, attr: res })
 	}
 
-	async fn setattr(&self, _req: Request, inode: u64, _fh: Option<u64>, _set_attr: SetAttr) -> Result<ReplyAttr> {
-		println!("setattr {:?}", inode);
+	async fn setattr(
+		&self,
+		_req: Request,
+		path: Option<&OsStr>,
+		_fh: Option<u64>,
+		_set_attr: SetAttr,
+	) -> Result<ReplyAttr> {
+		let path = path.ok_or_else(Errno::new_not_exist)?.to_string_lossy();
+		println!("setattr {:?}", path);
 
-		let path = self.store.get_path(inode).ok_or_else(|| Errno::from(ENOENT))?;
 		let res = self.stat(&path).ok_or_else(|| Errno::from(ENOENT))?;
 
 		Ok(ReplyAttr { ttl: TTL, attr: res })
@@ -257,99 +253,105 @@ impl Filesystem for IpfsMfs {
 	async fn mkdir(
 		&self,
 		_req: Request,
-		parent: u64,
+		parent: &OsStr,
 		name: &OsStr,
 		_mode: u32, //TODO: use this if applicable
 		_umask: u32,
 	) -> Result<ReplyEntry> {
 		println!("mkdir {:?} {:?}", parent, name);
-		let path = self
-			.store
-			.get_child_path(parent, name.to_str().unwrap())
-			.ok_or_else(|| Errno::from(ENOENT))?;
+		let mut path = PathBuf::from(parent);
+		path.push(name);
+		let path = path.to_str().unwrap();
 
-		WriteableBaseFs::mkdir(self, &path);
+		WriteableBaseFs::mkdir(self, path);
 
 		//TODO: better error handling/throwing
 
+		let stat = self.stat(path).ok_or_else(|| Errno::from(ENOENT))?;
+
+		Ok(ReplyEntry { ttl: TTL, attr: stat })
+	}
+
+	async fn unlink(&self, _req: Request, parent: &OsStr, name: &OsStr) -> Result<()> {
+		println!("unlink {:?} {:?}", parent, name);
+		let mut path = PathBuf::from(parent);
+		path.push(name);
+		let path = path.to_str().unwrap();
+
+		self.rm(path);
+
+		//TODO: better error handling/throwing
+
+		Ok(())
+	}
+
+	async fn rmdir(&self, _req: Request, parent: &OsStr, name: &OsStr) -> Result<()> {
+		println!("rmdir {:?} {:?}", parent, name);
+		let mut path = PathBuf::from(parent);
+		path.push(name);
+		let path = path.to_str().unwrap();
+
+		WriteableBaseFs::rmdir(self, path);
+
+		//TODO: better error handling/throwing
+
+		Ok(())
+	}
+
+	async fn rename(
+		&self,
+		_req: Request,
+		parent: &OsStr,
+		name: &OsStr,
+		new_parent: &OsStr,
+		new_name: &OsStr,
+	) -> Result<()> {
+		println!("rename {:?} {:?} {:?} {:?}", parent, name, new_parent, new_name);
+		let mut source = PathBuf::from(parent);
+		source.push(name);
+		let source = source.to_str().unwrap();
+		let mut target = PathBuf::from(new_parent);
+		target.push(new_name);
+		let target = target.to_str().unwrap();
+
+		self.mv(source, target);
+
+		//TODO: better error handling/throwing
+
+		Ok(())
+	}
+
+	async fn open(&self, _req: Request, path: &OsStr, _flags: u32) -> Result<ReplyOpen> {
+		println!("open {:?}", path);
+		let path = path.to_string_lossy();
 		let stat = self.stat(&path).ok_or_else(|| Errno::from(ENOENT))?;
 
-		Ok(ReplyEntry {
-			ttl: TTL,
-			attr: stat,
-			generation: 0,
-		})
-	}
-
-	async fn unlink(&self, _req: Request, parent: u64, name: &OsStr) -> Result<()> {
-		println!("unlink {:?} {:?}", parent, name);
-		let path = self
-			.store
-			.get_child_path(parent, name.to_str().unwrap())
-			.ok_or_else(|| Errno::from(ENOENT))?;
-
-		self.rm(&path);
-
-		//TODO: better error handling/throwing
-
-		Ok(())
-	}
-
-	async fn rmdir(&self, _req: Request, parent: u64, name: &OsStr) -> Result<()> {
-		println!("rmdir {:?} {:?}", parent, name);
-		let path = self
-			.store
-			.get_child_path(parent, name.to_str().unwrap())
-			.ok_or_else(|| Errno::from(ENOENT))?;
-
-		WriteableBaseFs::rmdir(self, &path);
-
-		//TODO: better error handling/throwing
-
-		Ok(())
-	}
-
-	async fn rename(&self, _req: Request, parent: u64, name: &OsStr, new_parent: u64, new_name: &OsStr) -> Result<()> {
-		println!("rename {:?} {:?} {:?} {:?}", parent, name, new_parent, new_name);
-		let source = self
-			.store
-			.get_child_path(parent, name.to_str().unwrap())
-			.ok_or_else(|| Errno::from(ENOENT))?;
-		let target = self
-			.store
-			.get_child_path(new_parent, new_name.to_str().unwrap())
-			.ok_or_else(|| Errno::from(ENOENT))?;
-
-		self.mv(&source, &target);
-
-		//TODO: better error handling/throwing
-
-		Ok(())
-	}
-
-	async fn read(&self, _req: Request, ino: u64, _fh: u64, offset: u64, size: u32) -> Result<ReplyData> {
-		println!("read {:?} {:?} {:?}", ino, offset, size);
-		match self.store.get_path(ino) {
-			Some(path) => {
-				let data = ReadonlyBaseFs::read(self, &path, offset, size);
-				Ok(ReplyData { data: data.into() })
-			}
-			None => Err(ENOENT.into()),
+		if stat.kind != FileType::Directory {
+			Ok(ReplyOpen { fh: 0, flags: 0 })
+		} else {
+			Err(libc::EISDIR.into())
 		}
+	}
+
+	async fn read(&self, _req: Request, path: Option<&OsStr>, _fh: u64, offset: u64, size: u32) -> Result<ReplyData> {
+		println!("read {:?} {:?} {:?}", path, offset, size);
+		let path = path.ok_or_else(Errno::new_not_exist)?.to_string_lossy();
+		let data = ReadonlyBaseFs::read(self, &path, offset, size);
+		Ok(ReplyData { data: data.into() })
 	}
 
 	async fn write(
 		&self,
 		_req: Request,
-		inode: u64,
+		path: Option<&OsStr>,
 		_fh: u64,
 		offset: u64,
 		data: &[u8],
 		_write_flags: u32,
 		_flags: u32,
 	) -> Result<ReplyWrite> {
-		println!("write {:?} {:?}", inode, offset);
-		let path = self.store.get_path(inode).ok_or_else(|| Errno::from(ENOENT))?;
+		println!("write {:?} {:?}", path, offset);
+		let path = path.ok_or_else(Errno::new_not_exist)?.to_string_lossy();
 
 		WriteableBaseFs::write(self, &path, offset, data);
 
@@ -361,20 +363,19 @@ impl Filesystem for IpfsMfs {
 	async fn create(
 		&self,
 		_req: Request,
-		parent: u64,
+		parent: &OsStr,
 		name: &OsStr,
 		_mode: u32, //TODO: use this if applicable
 		flags: u32, //TODO: use this if applicable
 	) -> Result<ReplyCreated> {
 		println!("create {:?} {:?}", parent, name);
-		let path = self
-			.store
-			.get_child_path(parent, name.to_str().unwrap())
-			.ok_or_else(|| Errno::from(ENOENT))?;
+		let mut path = PathBuf::from(parent);
+		path.push(name);
+		let path = path.to_str().unwrap();
 
-		WriteableBaseFs::create(self, &path);
+		WriteableBaseFs::create(self, path);
 
-		let stat = self.stat(&path).ok_or_else(|| Errno::from(ENOENT))?;
+		let stat = self.stat(path).ok_or_else(|| Errno::from(ENOENT))?;
 
 		Ok(ReplyCreated {
 			ttl: TTL,
@@ -385,78 +386,130 @@ impl Filesystem for IpfsMfs {
 		})
 	}
 
+	async fn fallocate(
+		&self,
+		_req: Request,
+		path: Option<&OsStr>,
+		_fh: u64,
+		_offset: u64,
+		_length: u64,
+		_mode: u32,
+	) -> Result<()> {
+		println!("fallocate {:?}", path);
+		let path = path.ok_or_else(Errno::new_not_exist)?.to_string_lossy();
+		let stat = self.stat(&path).ok_or_else(|| Errno::from(ENOENT))?;
+
+		if stat.kind != FileType::Directory {
+			Ok(())
+		} else {
+			Err(libc::EISDIR.into())
+		}
+	}
+
 	async fn readdir(
 		&self,
 		_req: Request,
-		ino: u64,
+		path: &OsStr,
 		_fh: u64,
 		offset: i64,
 	) -> Result<ReplyDirectory<impl Stream<Item = Result<DirectoryEntry>> + Send + '_>> {
-		println!("readdir {:?} {:?}", ino, offset);
-		match self.store.get_path(ino) {
-			None => Err(ENOENT.into()),
-			Some(path) => {
-				let names = self.ls(&path);
-				let to_skip = if offset == 0 { offset } else { offset + 1 } as usize;
+		println!("readdir {:?} {:?}", path, offset);
+		let path = path.to_str().unwrap();
+		let mut items = Vec::from([".".to_owned(), "..".to_owned()]);
+		let mut names = self.ls(path);
+		items.append(&mut names);
+		let to_skip = if offset == 0 { offset } else { offset + 1 } as usize;
 
-				let mut res = Vec::new();
-				for (i, name) in names.into_iter().enumerate().skip(to_skip) {
-					let path = self.store.get_child_path(ino, &name).unwrap();
-					let stat = self.stat(&path).unwrap();
-					res.push(Ok(DirectoryEntry {
-						inode: stat.ino,
-						kind: stat.kind,
-						name: name.into(),
-						offset: (i + 1) as i64,
-					}));
-				}
-
-				Ok(ReplyDirectory {
-					entries: stream::iter(res),
-				})
-			}
+		let mut res = Vec::new();
+		for (i, name) in items.into_iter().enumerate().skip(to_skip) {
+			let mut path = PathBuf::from(path);
+			path.push(&name);
+			let path = path.to_str().unwrap();
+			let stat = self.stat(path).unwrap();
+			res.push(Ok(DirectoryEntry {
+				kind: stat.kind,
+				name: name.into(),
+				offset: (i + 1) as i64,
+			}));
 		}
+
+		Ok(ReplyDirectory {
+			entries: stream::iter(res),
+		})
 	}
 
 	async fn readdirplus(
 		&self,
 		_req: Request,
-		ino: u64,
+		path: &OsStr,
 		_fh: u64,
 		offset: u64,
 		_lock_owner: u64,
 	) -> Result<ReplyDirectoryPlus<impl Stream<Item = Result<DirectoryEntryPlus>> + Send + '_>> {
-		println!("readdirplus {:?} {:?}", ino, offset);
-		match self.store.get_path(ino) {
-			None => Err(ENOENT.into()),
-			Some(path) => {
-				let names = self.ls(&path);
-				let to_skip = if offset == 0 { offset } else { offset + 1 } as usize;
+		println!("readdirplus {:?} {:?}", path, offset);
+		let path = path.to_str().unwrap();
+		let mut items = Vec::from([".".to_owned(), "..".to_owned()]);
+		let mut names = self.ls(path);
+		items.append(&mut names);
+		let to_skip = if offset == 0 { offset } else { offset + 1 } as usize;
 
-				let mut res = Vec::new();
-				for (i, name) in names.into_iter().enumerate().skip(to_skip) {
-					let path = self.store.get_child_path(ino, &name).unwrap();
-					let stat = self.stat(&path).unwrap();
-					res.push(Ok(DirectoryEntryPlus {
-						inode: stat.ino,
-						generation: 0,
-						kind: stat.kind,
-						name: name.into(),
-						offset: (i + 1) as i64,
-						attr: stat,
-						entry_ttl: TTL,
-						attr_ttl: TTL,
-					}));
+		let mut res = Vec::new();
+		for (i, name) in items.into_iter().enumerate().skip(to_skip) {
+			let mut path = PathBuf::from(path);
+			path.push(&name);
+			let path = path.to_str().unwrap();
+			let stat = self.stat(path).unwrap();
+			res.push(Ok(DirectoryEntryPlus {
+				kind: stat.kind,
+				name: name.into(),
+				offset: (i + 1) as i64,
+				attr: stat,
+				entry_ttl: TTL,
+				attr_ttl: TTL,
+			}));
+		}
+
+		Ok(ReplyDirectoryPlus {
+			entries: stream::iter(res),
+		})
+	}
+
+	async fn lseek(
+		&self,
+		_req: Request,
+		path: Option<&OsStr>,
+		_fh: u64,
+		offset: u64,
+		whence: u32,
+	) -> Result<ReplyLSeek> {
+		println!("lseek {:?}", path);
+		let path = path.ok_or_else(Errno::new_not_exist)?.to_string_lossy();
+		let stat = self.stat(&path).ok_or_else(|| Errno::from(ENOENT))?;
+
+		let whence = whence as i32;
+
+		if stat.kind != FileType::Directory {
+			let offset = if whence == libc::SEEK_CUR || whence == libc::SEEK_SET {
+				offset
+			} else if whence == libc::SEEK_END {
+				let content_size = stat.size;
+
+				if content_size >= offset as _ {
+					content_size - offset
+				} else {
+					0
 				}
+			} else {
+				return Err(libc::EINVAL.into());
+			};
 
-				Ok(ReplyDirectoryPlus {
-					entries: stream::iter(res),
-				})
-			}
+			Ok(ReplyLSeek { offset })
+		} else {
+			Err(libc::EISDIR.into())
 		}
 	}
 
-	async fn statfs(&self, _req: Request, _inode: u64) -> Result<ReplyStatFs> {
+	async fn statfs(&self, _req: Request, _path: &OsStr) -> Result<ReplyStatFs> {
 		println!("statfs");
 		Ok(STATFS)
 	}
@@ -464,37 +517,25 @@ impl Filesystem for IpfsMfs {
 	async fn copy_file_range(
 		&self,
 		req: Request,
-		inode: u64,
+		path: Option<&OsStr>,
 		fh_in: u64,
 		off_in: u64,
-		inode_out: u64,
+		path_out: Option<&OsStr>,
 		fh_out: u64,
 		off_out: u64,
 		length: u64,
 		flags: u64,
 	) -> Result<ReplyCopyFileRange> {
 		println!("copy_file_range");
-		let data = Filesystem::read(self, req, inode, fh_in, off_in, length as _).await?;
+		let data = PathFilesystem::read(self, req, path, fh_in, off_in, length as _).await?;
 
 		let data = data.data.as_ref();
 
 		let ReplyWrite { written } =
-			Filesystem::write(self, req, inode_out, fh_out, off_out, data, 0, flags as _).await?;
+			PathFilesystem::write(self, req, path_out, fh_out, off_out, data, 0, flags as _).await?;
 
 		Ok(ReplyCopyFileRange {
 			copied: u64::from(written),
 		})
-	}
-
-	async fn fsync(&self, _req: Request, _inode: u64, _fh: u64, _datasync: bool) -> Result<()> {
-		Ok(())
-	}
-
-	async fn flush(&self, _req: Request, _inode: u64, _fh: u64, _lock_owner: u64) -> Result<()> {
-		Ok(())
-	}
-
-	async fn access(&self, _req: Request, _inode: u64, _mask: u32) -> Result<()> {
-		Ok(())
 	}
 }

@@ -1,4 +1,4 @@
-use fuse3::raw::prelude::*;
+use fuse3::path::prelude::*;
 
 pub trait ReadonlyBaseFs {
 	fn stat(&self, path: &str) -> Option<FileAttr>;

@@ -18,11 +18,11 @@
 
 mod base_fs;
 mod ipfs_mfs;
-mod path_store;
 
 use crate::ipfs_mfs::IpfsMfs;
 use fuse3::MountOptions;
-use fuse3::raw::{MountHandle, Session};
+use fuse3::path::Session;
+use fuse3::raw::MountHandle;
 
 pub async fn mount<S: AsRef<str>>(mountpoint: S, path: S) -> MountHandle {
 	let uid = unsafe { libc::getuid() };
