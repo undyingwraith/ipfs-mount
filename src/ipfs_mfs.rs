@@ -245,6 +245,15 @@ impl Filesystem for IpfsMfs {
 		Ok(ReplyAttr { ttl: TTL, attr: res })
 	}
 
+	async fn setattr(&self, _req: Request, inode: u64, _fh: Option<u64>, _set_attr: SetAttr) -> Result<ReplyAttr> {
+		println!("setattr {:?}", inode);
+
+		let path = self.store.get_path(inode).ok_or_else(|| Errno::from(ENOENT))?;
+		let res = self.stat(&path).ok_or_else(|| Errno::from(ENOENT))?;
+
+		Ok(ReplyAttr { ttl: TTL, attr: res })
+	}
+
 	async fn mkdir(
 		&self,
 		_req: Request,
@@ -475,5 +484,17 @@ impl Filesystem for IpfsMfs {
 		Ok(ReplyCopyFileRange {
 			copied: u64::from(written),
 		})
+	}
+
+	async fn fsync(&self, _req: Request, _inode: u64, _fh: u64, _datasync: bool) -> Result<()> {
+		Ok(())
+	}
+
+	async fn flush(&self, _req: Request, _inode: u64, _fh: u64, _lock_owner: u64) -> Result<()> {
+		Ok(())
+	}
+
+	async fn access(&self, _req: Request, _inode: u64, _mask: u32) -> Result<()> {
+		Ok(())
 	}
 }
